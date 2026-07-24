@@ -1,350 +1,311 @@
 import os
+import re
 import subprocess
 from pathlib import Path
-from datetime import datetime
 
-from openai import files
-import yaml
-import gspread
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-GOOGLE_SHEET_NAME = "Project Updates (Responses)"
+# Only the document ID, NOT the full URL
+GOOGLE_DOC_ID = "1L1nzyLF2CkZ4POnhI-WNUUiGKfuXlGGQp_ZLW0SAgv8"
 
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/drive.readonly"
 ]
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 
-KB = ROOT / "knowledge_base"
+CREDENTIALS = ROOT / "credentials.json"
 
-PROJECTS = KB / "projects"
+OUTPUT_DIR = ROOT / "knowledge_base"
 
-REGISTRY = KB / "registry" / "projects.yaml"
+OUTPUT_FILE = OUTPUT_DIR / "ACKOInsurance.md"
 
-LOGS = KB / "logs"
-
-PROCESSED = LOGS / "processed.txt"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# SETUP
+# GOOGLE AUTH
 # ============================================================
 
-PROJECTS.mkdir(parents=True, exist_ok=True)
+def get_credentials():
 
-LOGS.mkdir(parents=True, exist_ok=True)
-
-REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-
-if not REGISTRY.exists():
-
-    with open(REGISTRY, "w") as f:
-
-        yaml.safe_dump({"projects": {}}, f)
-
-if not PROCESSED.exists():
-
-    PROCESSED.touch()
-
-
-# ============================================================
-# GOOGLE SHEETS
-# ============================================================
-
-def fetch_updates():
-
-    creds = Credentials.from_service_account_file(
-        "credentials.json",
+    return service_account.Credentials.from_service_account_file(
+        CREDENTIALS,
         scopes=SCOPES
     )
 
-    client = gspread.authorize(creds)
 
-    sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-    rows = sheet.get_all_records()
-    rows = sheet.get_all_records()
+def get_docs_service():
 
-    updates = []
-
-    for row in rows:
-
-        updates.append({
-
-            "timestamp": str(row.get("Timestamp", "")),
-
-            "team_lead": row.get("Team Lead Name", ""),
-
-            "project_name": row.get("Project name", "").strip(),
-
-            "client_name": row.get("Client Name", ""),
-
-            "new_project": str(
-                row.get(
-                    "Is this a new project or an existing project?",
-                    ""
-                )
-            ).lower(),
-
-            "project_type": row.get("Project Type", ""),
-
-            "objective": row.get(
-                "What is the primary objective of the project?",
-                ""
-            ),
-
-            "business_problem": row.get(
-                "What business problem or client requirement",
-                ""
-            ),
-
-            "features": row.get(
-                "Features of the project(New)",
-                ""
-            ),
-
-            "highlights": row.get(
-                "What are the key highlights of the project that",
-                ""
-            ),
-
-            "latest_changes": row.get(
-                "What has changed or been achieved since the",
-                ""
-            ),
-
-            "future_changes": row.get(
-                "What changes are needed",
-                ""
-            )
-
-        })
-
-    return updates
+    return build(
+        "docs",
+        "v1",
+        credentials=get_credentials(),
+        cache_discovery=False
+    )
 
 
 # ============================================================
-# PROCESSED LOG
+# GOOGLE DOC
 # ============================================================
 
-def load_processed():
+def fetch_document():
 
-    with open(PROCESSED, "r") as f:
+    drive = build(
+        "drive",
+        "v3",
+        credentials=get_credentials(),
+        cache_discovery=False
+    )
 
-        return {
-            line.strip()
-            for line in f
-            if line.strip()
-        }
+    file = drive.files().get(
+        fileId=GOOGLE_DOC_ID,
+        fields="id,name,mimeType"
+    ).execute()
 
+    document = get_docs_service().documents().get(
+        documentId=GOOGLE_DOC_ID
+    ).execute()
 
-def is_processed(timestamp):
+    document["title"] = file.get("name", document.get("title", ""))
 
-    return timestamp in load_processed()
-
-
-def mark_processed(timestamp):
-
-    with open(PROCESSED, "a") as f:
-
-        f.write(timestamp + "\n")
+    return document
 
 # ============================================================
-# REGISTRY
+# MARKDOWN HELPERS
 # ============================================================
 
-def load_registry():
+def clean_text(text):
 
-    with open(REGISTRY, "r", encoding="utf-8") as f:
-
-        data = yaml.safe_load(f)
-
-    if data is None:
-        data = {"projects": {}}
-
-    if "projects" not in data:
-        data["projects"] = {}
-
-    return data
+    return (
+        text.replace("\v", "")
+            .replace("\r", "")
+            .rstrip()
+    )
 
 
-def save_registry(data):
+def apply_text_style(text, style):
 
-    with open(REGISTRY, "w", encoding="utf-8") as f:
+    if not text:
+        return ""
 
-        yaml.safe_dump(
-            data,
-            f,
-            sort_keys=False,
-            allow_unicode=True
-        )
+    if style.get("bold"):
+        text = f"**{text}**"
+
+    if style.get("italic"):
+        text = f"*{text}*"
+
+    if style.get("strikethrough"):
+        text = f"~~{text}~~"
+
+    if style.get("underline"):
+        text = f"<u>{text}</u>"
+
+    if style.get("link"):
+
+        url = style["link"]["url"]
+
+        text = f"[{text}]({url})"
+
+    return text
 
 
-def register_project(project_name, file_path):
+def paragraph_text(paragraph):
 
-    registry = load_registry()
+    text = ""
 
-    registry["projects"][project_name.lower()] = {
-        "name": project_name,
-        "path": str(file_path),
-        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for element in paragraph.get("elements", []):
+
+        run = element.get("textRun")
+
+        if not run:
+            continue
+
+        content = clean_text(run.get("content", ""))
+
+        if not content:
+            continue
+
+        style = run.get("textStyle", {})
+
+        text += apply_text_style(content, style)
+
+    return text
+
+
+def heading_prefix(style):
+
+    mapping = {
+        "TITLE": "# ",
+        "SUBTITLE": "## ",
+        "HEADING_1": "# ",
+        "HEADING_2": "## ",
+        "HEADING_3": "### ",
+        "HEADING_4": "#### ",
+        "HEADING_5": "##### ",
+        "HEADING_6": "###### "
     }
 
-    save_registry(registry)
-
-
-# ============================================================
-# MARKDOWN
-# ============================================================
-
-def create_markdown(project):
-
-    return f"""# {project['project_name']}
-
-## Client
-
-{project['client_name']}
-
----
-
-## Team Lead
-
-{project['team_lead']}
-
----
-
-## Project Type
-
-{project['project_type']}
-
----
-
-## Objective
-
-{project['objective']}
-
----
-
-## Business Problem
-
-{project['business_problem']}
-
----
-
-## Features
-
-{project['features']}
-
----
-
-## Highlights
-
-{project['highlights']}
-
----
-
-## Latest Changes
-
-{project['latest_changes']}
-
----
-
-## Future Changes
-
-{project['future_changes']}
-"""
-
+    return mapping.get(style, "")
 
 # ============================================================
-# CREATE PROJECT
+# TABLES
 # ============================================================
 
-def create_project(project):
+def table_to_markdown(table):
 
-    filename = (
-        project["project_name"]
-        .replace("/", "-")
-        .replace("\\", "-")
-        .strip()
-        + ".md"
+    rows = []
+
+    for row in table.get("tableRows", []):
+
+        cols = []
+
+        for cell in row.get("tableCells", []):
+
+            value = ""
+
+            for content in cell.get("content", []):
+
+                if "paragraph" not in content:
+                    continue
+
+                value += paragraph_to_markdown(
+                    content["paragraph"]
+                ).strip()
+
+            cols.append(value)
+
+        rows.append(cols)
+
+    if not rows:
+        return ""
+
+    md = []
+
+    md.append("| " + " | ".join(rows[0]) + " |")
+
+    md.append(
+        "| "
+        + " | ".join(["---"] * len(rows[0]))
+        + " |"
     )
 
-    filepath = PROJECTS / filename
+    for row in rows[1:]:
 
-    with open(filepath, "w", encoding="utf-8") as f:
+        md.append("| " + " | ".join(row) + " |")
 
-        f.write(create_markdown(project))
-
-    register_project(
-        project["project_name"],
-        filepath
-    )
-
-    print(f"Created: {project['project_name']}")
+    return "\n".join(md)
 
 
 # ============================================================
-# UPDATE PROJECT
+# PARAGRAPH -> MARKDOWN
 # ============================================================
 
-def update_project(project):
+def paragraph_to_markdown(paragraph):
 
-    registry = load_registry()
+    text = paragraph_text(paragraph).strip()
 
-    info = registry["projects"].get(
-        project["project_name"].lower()
+    if not text:
+        return ""
+
+    style = paragraph.get(
+        "paragraphStyle",
+        {}
+    ).get(
+        "namedStyleType",
+        "NORMAL_TEXT"
     )
 
-    if info is None:
+    prefix = heading_prefix(style)
 
-        create_project(project)
+    if prefix:
+        return prefix + text
 
-        return
+    if "bullet" in paragraph:
 
-    filepath = Path(info["path"])
+        level = paragraph["bullet"].get(
+            "nestingLevel",
+            0
+        )
 
-    with open(filepath, "a", encoding="utf-8") as f:
+        return ("  " * level) + "- " + text
 
-        f.write(f"""
+    return text
 
-------------------------------------------------------------
 
-# Update
+# ============================================================
+# GOOGLE DOC -> MARKDOWN
+# ============================================================
 
-Date:
-{project['timestamp']}
+def document_to_markdown(document):
 
-## Highlights
+    markdown = []
 
-{project['highlights']}
+    body = document["body"]["content"]
 
-## Latest Changes
+    for element in body:
 
-{project['latest_changes']}
+        # Paragraphs
+        if "paragraph" in element:
 
-## Features
+            line = paragraph_to_markdown(
+                element["paragraph"]
+            )
 
-{project['features']}
+            if line:
 
-## Future Changes
+                markdown.append(line)
+                markdown.append("")
 
-{project['future_changes']}
+        # Tables
+        elif "table" in element:
 
-""")
+            markdown.append(
+                table_to_markdown(
+                    element["table"]
+                )
+            )
 
-    register_project(
-        project["project_name"],
-        filepath
+            markdown.append("")
+
+        # Horizontal separator
+        elif "sectionBreak" in element:
+
+            markdown.append("---")
+            markdown.append("")
+
+    while markdown and markdown[-1] == "":
+        markdown.pop()
+
+    return "\n".join(markdown)
+
+
+# ============================================================
+# SAVE MARKDOWN
+# ============================================================
+
+def save_markdown(document):
+
+    markdown = document_to_markdown(
+        document
     )
 
-    print(f"Updated: {project['project_name']}")
+    with open(
+        OUTPUT_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
+        f.write(markdown)
+
+    print(f"Saved: {OUTPUT_FILE}")
 
 # ============================================================
 # GIT
@@ -354,7 +315,10 @@ def push_to_github():
 
     try:
 
-        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(
+            ["git", "add", "."],
+            check=True
+        )
 
         diff = subprocess.run(
             ["git", "diff", "--cached", "--quiet"]
@@ -362,7 +326,7 @@ def push_to_github():
 
         if diff.returncode == 0:
 
-            print("\nNo git changes detected.")
+            print("No changes detected.")
 
             return
 
@@ -371,7 +335,7 @@ def push_to_github():
                 "git",
                 "commit",
                 "-m",
-                f"Knowledge Base Sync {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                "Knowledge Base Sync"
             ],
             check=True
         )
@@ -381,11 +345,11 @@ def push_to_github():
             check=True
         )
 
-        print("\nGitHub updated successfully.")
+        print("GitHub updated successfully.")
 
-    except Exception as e:
+    except subprocess.CalledProcessError as e:
 
-        print("\nGit Push Failed")
+        print("Git operation failed.")
 
         print(e)
 
@@ -397,78 +361,20 @@ def push_to_github():
 def main():
 
     print("=" * 60)
-    print("Knowledge Base Sync Started")
+    print("Knowledge Base Sync")
     print("=" * 60)
 
-    updates = fetch_updates()
+    print("Fetching Google Document...")
 
-    print(f"\nFound {len(updates)} responses\n")
+    document = fetch_document()
 
-    created = 0
-    updated = 0
-    skipped = 0
+    print(f"Title : {document.get('title', document.get('name', ''))}")
 
-    registry = load_registry()
+    print("Converting to Markdown...")
 
-    processed = load_processed()
+    save_markdown(document)
 
-    for project in updates:
-
-        timestamp = project["timestamp"]
-
-        if timestamp in processed:
-
-            print(f"Skipping : {project['project_name']}")
-
-            skipped += 1
-
-            continue
-
-        project_name = project["project_name"]
-
-        if not project_name:
-
-            print("Skipping empty project name")
-
-            continue
-
-        exists = (
-            project_name.lower()
-            in registry["projects"]
-        )
-
-        try:
-
-            if exists:
-
-                update_project(project)
-
-                updated += 1
-
-            else:
-
-                create_project(project)
-
-                created += 1
-
-            mark_processed(timestamp)
-
-            processed.add(timestamp)
-
-        except Exception as e:
-
-            print(f"\nError processing {project_name}")
-
-            print(e)
-
-    print("\n")
-    print("=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-
-    print(f"Created : {created}")
-    print(f"Updated : {updated}")
-    print(f"Skipped : {skipped}")
+    print("Uploading to GitHub...")
 
     push_to_github()
 
