@@ -13,7 +13,7 @@ from google.oauth2.service_account import Credentials
 # CONFIG
 # ============================================================
 
-GOOGLE_SHEET_NAME = "Knowledge Base Updates"
+GOOGLE_SHEET_NAME = "Project Updates (Responses)"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -67,13 +67,8 @@ def fetch_updates():
 
     client = gspread.authorize(creds)
 
-    files = client.list_spreadsheet_files()
-
-    print("Accessible spreadsheets:")
-    for f in files:
-        print("-", f["name"])
-
-    return []
+    sheet = client.open(GOOGLE_SHEET_NAME).sheet1
+    rows = sheet.get_all_records()
     rows = sheet.get_all_records()
 
     updates = []
