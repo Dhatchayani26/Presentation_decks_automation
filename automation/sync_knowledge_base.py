@@ -27,6 +27,8 @@ OUTPUT_DIR = ROOT / "knowledge_base"
 
 OUTPUT_FILE = OUTPUT_DIR / "ACKOInsurance.md"
 
+STATE_FILE = OUTPUT_DIR / "logs" / "ACKOInsurance.modified_time.txt"
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -67,7 +69,7 @@ def fetch_document():
 
     file = drive.files().get(
         fileId=GOOGLE_DOC_ID,
-        fields="id,name,mimeType"
+        fields="id,name,mimeType,modifiedTime"
     ).execute()
 
     document = get_docs_service().documents().get(
@@ -75,8 +77,23 @@ def fetch_document():
     ).execute()
 
     document["title"] = file.get("name", document.get("title", ""))
+    document["modifiedTime"] = file.get("modifiedTime", "")
 
     return document
+
+
+def load_last_modified_time():
+
+    if not STATE_FILE.exists():
+        return ""
+
+    return STATE_FILE.read_text(encoding="utf-8").strip()
+
+
+def save_last_modified_time(modified_time):
+
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(modified_time, encoding="utf-8")
 
 # ============================================================
 # MARKDOWN HELPERS
@@ -368,6 +385,13 @@ def main():
 
     document = fetch_document()
 
+    modified_time = document.get("modifiedTime", "")
+    last_modified_time = load_last_modified_time()
+
+    if modified_time and modified_time == last_modified_time:
+        print("No document changes detected.")
+        return
+
     print(f"Title : {document.get('title', document.get('name', ''))}")
 
     print("Converting to Markdown...")
@@ -377,6 +401,9 @@ def main():
     print("Uploading to GitHub...")
 
     push_to_github()
+
+    if modified_time:
+        save_last_modified_time(modified_time)
 
     print("\nDone.")
 
