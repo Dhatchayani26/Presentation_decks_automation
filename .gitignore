@@ -1,0 +1,21 @@
+# Python
+
+__pycache__/
+*.pyc
+
+# Google credentials
+
+credentials.json
+
+# Logs
+
+logs/
+
+# Virtual env
+
+venv/
+.env
+
+# VSCode
+
+.vscode/

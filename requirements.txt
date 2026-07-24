@@ -1,0 +1,4 @@
+PyYAML
+gspread
+google-auth
+python-frontmatter
